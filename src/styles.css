@@ -1,0 +1,6 @@
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:12px}
+.app{max-width:720px;margin:0 auto}
+.controls button{margin-right:8px}
+.logs{margin-top:20px}
+.stream{background:#f8f8f8;padding:10px;border-radius:6px;min-height:120px}
+.msg{padding:6px 0;border-bottom:1px solid #eee}
