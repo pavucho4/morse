@@ -1,6 +1,7 @@
 {
   "version": 2,
   "routes": [
-    { "src": "/(.*)", "dest": "/index.html" }
+    { "src": "/assets/(.*)", "dest": "/assets/$1" },  // <-- статические ассеты
+    { "src": "/(.*)", "dest": "/index.html" }        // <-- SPA fallback
   ]
 }
