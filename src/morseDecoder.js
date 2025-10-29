@@ -1,5 +1,6 @@
 // Lightweight morse decoder: maps dot/dash sequences to characters
 export const MORSE_TABLE = {
+  // Русские буквы
   '.-': 'А',
   '-...': 'Б',
   '.--': 'В',
@@ -32,7 +33,7 @@ export const MORSE_TABLE = {
   '..-..': 'Э',
   '..--': 'Ю',
   '.-.-': 'Я',
-  // цифры
+  // Цифры
   '-----': '0',
   '.----': '1',
   '..---': '2',
@@ -42,10 +43,58 @@ export const MORSE_TABLE = {
   '-....': '6',
   '--...': '7',
   '---..': '8',
-  '----.': '9'
+  '----.': '9',
+  // Знаки препинания (не используются в режиме "цифры", но полезны)
+  '.-.-.-': '.', // Точка
+  '--..--': ',', // Запятая
+  '---...': ':', // Двоеточие
+  '-.-.-.': ';', // Точка с запятой
+  '..--..': '?', // Вопросительный знак
+  '-.-.--': '!', // Восклицательный знак
+  '.-..-.': '"', // Кавычки
+  '-....-': '-', // Дефис
+  '.-...': '&', // Амперсанд
+  '.--.-.': '@', // Собака
+  '-.-.': '(', // Открывающая скобка
+  '-.--.-': ')', // Закрывающая скобка
+  '.-.-.': '+', // Плюс
+  '-...-': '=', // Равно
+  '.-.-': 'Я', // Я
 }
 
+export const LETTERS_SEQUENCES = [
+  '.-', '-...', '.--', '--.', '-..', '.', '...-', '--..', '..', '.---', '-.-', '.-..', '--', '-.', '---', '.--.', '.-.', '...', '-', '..-', '..-.', '....', '-.-.', '---.', '----', '--.-', '--.--', '-.--', '-..-', '..-..', '..--', '.-.-'
+]
 
-export function decodeSymbol(seq){
-  return MORSE_TABLE[seq] || '?'
+export const DIGITS_SEQUENCES = [
+  '-----', '.----', '..---', '...--', '....-', '.....', '-....', '--...', '---..', '----.'
+]
+
+
+export function decodeSymbol(seq, mode='letters'){
+  if (mode === 'digits') {
+    if (DIGITS_SEQUENCES.includes(seq)) {
+      return MORSE_TABLE[seq] || '?'
+    } else {
+      return '?'
+    }
+  } else {
+    // Режим "буквы" включает все, кроме цифр
+    if (DIGITS_SEQUENCES.includes(seq)) {
+      return '?'
+    }
+    return MORSE_TABLE[seq] || '?'
+  }
+}
+
+export function decodeGap(gapDuration, dotMs){
+  const interCharGap = dotMs * 3
+  const interWordGap = dotMs * 7
+
+  if (gapDuration >= interWordGap) {
+    return '  ' // Два пробела для межсловного интервала
+  } else if (gapDuration >= interCharGap) {
+    return ' ' // Один пробел для межбуквенного интервала
+  }
+  return '' // Межэлементный интервал (внутри символа)
 }
