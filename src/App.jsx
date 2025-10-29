@@ -15,7 +15,7 @@ const T = {
   wpm: 'Скорость (WPM)',
   dashDotRatio: 'Соотношение Тире/Точка',
   pauseMultiplier: 'Множитель Паузы',
-  sensitivity: 'Чувствительность',
+  sensitivity: 'Порог Чувствительности (0-50)', // Изменено название
   noiseGate: 'Шумодав (мс)',
   startReceiving: 'Начать Прием (микрофон)',
   stopReceiving: 'Остановить',
@@ -46,16 +46,15 @@ export default function App(){
   const [dashDotRatio, setDashDotRatio] = useState(4.5) // Соотношение Тире/Точка
   const [pauseMultiplier, setPauseMultiplier] = useState(5.5) // Множитель Паузы
   
-  // Новые настройки обнаружения сигнала
-  const [sensitivity, setSensitivity] = useState(2.0) // Множитель порога (2.0 = в 2 раза выше шума)
+  // Новые настройки обнаружения сигнала (Статический Порог)
+  const [sensitivity, setSensitivity] = useState(15) // Абсолютный порог (1-50)
   const [noiseGate, setNoiseGate] = useState(20) // Минимальная длительность тона (мс)
   
   const [decodeMode, setDecodeMode] = useState('letters') // 'letters' or 'digits'
   const [logs, setLogs] = useState([])
   const [analyser, setAnalyser] = useState(null)
   const [isTone, setIsTone] = useState(false)
-  const [noiseFloor, setNoiseFloor] = useState(0) // Уровень шума
-  const [detectionThreshold, setDetectionThreshold] = useState(0) // Порог обнаружения
+  const [detectionThreshold, setDetectionThreshold] = useState(0) // Порог обнаружения (теперь статический)
   
   const receiverRef = useRef(null)
   const clientIdRef = useRef(uid())
@@ -134,7 +133,7 @@ export default function App(){
         setWpm(roomData.wpm || 60)
         setDashDotRatio(roomData.dashDotRatio || 4.5)
         setPauseMultiplier(roomData.pauseMultiplier || 5.5)
-        setSensitivity(roomData.sensitivity || 2.0)
+        setSensitivity(roomData.sensitivity || 15)
         setNoiseGate(roomData.noiseGate || 20)
       }
     })
@@ -151,6 +150,11 @@ export default function App(){
       set(ref(db, `rooms/${joinedRoom}/noiseGate`), noiseGate)
     }
   }, [decodeMode, wpm, dashDotRatio, pauseMultiplier, sensitivity, noiseGate, joinedRoom, isHost])
+  
+  // Устанавливаем detectionThreshold равным sensitivity (статический порог)
+  useEffect(() => {
+    setDetectionThreshold(sensitivity)
+  }, [sensitivity])
 
   const handleSymbol = useCallback(async (seq, gapType) => {
     const char = decodeSymbol(seq, decodeMode)
@@ -175,10 +179,8 @@ export default function App(){
 
     receiverRef.current = new AudioMorseReceiver({
       onSymbol: handleSymbol,
-      onRawToggle: (isTone, level, noiseFloor, detectionThreshold)=>{
+      onRawToggle: (isTone, level)=>{ // Убран noiseFloor и detectionThreshold
         setIsTone(isTone)
-        setNoiseFloor(noiseFloor)
-        setDetectionThreshold(detectionThreshold)
       },
       centerFreqHz: 1600,
       bandwidthHz: 100, // Уменьшено для избирательности
@@ -187,7 +189,7 @@ export default function App(){
       // Передача новых настроек
       dashDotRatio: dashDotRatio,
       pauseMultiplier: pauseMultiplier,
-      noiseThresholdMultiplier: sensitivity,
+      staticThreshold: sensitivity, // Передаем статический порог
       minToneDurationMs: noiseGate
     })
     receiverRef.current.setWPM(wpm)
@@ -283,14 +285,14 @@ export default function App(){
           />
         </div>
 
-        {/* Настройка Чувствительности */}
+        {/* Настройка Чувствительности (Статический Порог) */}
         <div className="setting-item">
-          <label>{T.sensitivity} (x{sensitivity.toFixed(1)})</label>
+          <label>{T.sensitivity} ({sensitivity})</label>
           <input 
             type="range" 
-            min={1.0} 
-            max={10.0} 
-            step={0.1}
+            min={1} 
+            max={50} 
+            step={1}
             value={sensitivity} 
             onChange={e=>setSensitivity(Number(e.target.value))} 
             disabled={!isHost}
@@ -329,8 +331,7 @@ export default function App(){
             {analyser && <FrequencyVisualizer 
               analyser={analyser} 
               isTone={isTone} 
-              noiseFloor={noiseFloor} 
-              detectionThreshold={detectionThreshold}
+              detectionThreshold={detectionThreshold} // Передаем статический порог
             />}
           </>
         ) : (

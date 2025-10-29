@@ -1,177 +1,181 @@
-// Handles microphone capture, band-pass/high-pass filtering, energy detection and simple morse timing
-import { decodeGap } from './morseDecoder'
+import { decodeGap } from './morseDecoder';
 
 export class AudioMorseReceiver {
-  constructor({onSymbol, onRawToggle, centerFreqHz = 1600, bandwidthHz = 100, fftSize=2048, sampleRate=44100, dashDotRatio = 3.0, pauseMultiplier = 3.0, noiseThresholdMultiplier = 2.0, minToneDurationMs = 20}){
-    this.onSymbol = onSymbol // called when a decoded letter arrives (seq, gapType)
-    this.onRawToggle = onRawToggle // called for debug: (isToneOn, level, noiseFloor, detectionThreshold)
-    this.centerFreqHz = centerFreqHz 
-    this.bandwidthHz = bandwidthHz   
-    this.fftSize = fftSize
-    this.sampleRate = sampleRate
+    constructor(options) {
+        this.options = {
+            onSymbol: () => {},
+            onRawToggle: () => {},
+            centerFreqHz: 1600,
+            bandwidthHz: 100,
+            fftSize: 2048,
+            sampleRate: 44100,
+            dashDotRatio: 4.5,
+            pauseMultiplier: 5.5,
+            staticThreshold: 15, // Статический порог (0-255)
+            minToneDurationMs: 20, // Шумодав
+            ...options
+        };
 
-    this.audioCtx = null
-    this.analyser = null
-    this.source = null
-    this.filter = null
-    this.running = false
+        this.wpm = 60;
+        this.dotMs = 60000 / (50 * this.wpm); // Длительность точки
+        this.dashMs = this.dotMs * this.options.dashDotRatio; // Длительность тире
 
-    // morse timing state
-    this.isTone = false
-    this.toneStart = 0
-    this.toneEnd = 0
-    this.lastTick = performance.now()
-    this.lastToneEnd = 0 
-    this.symbolBuffer = ''
-    this.charBuffer = ''
+        this.audioContext = null;
+        this.analyser = null;
+        this.mediaStreamSource = null;
+        this.bandpassFilter = null;
 
-    // adaptive threshold
-    this.noiseFloor = 0
-    this.peakLevel = 0
-    this.alpha = 0.99 // Увеличиваем сглаживание для более стабильного шумового порога
-    
-    // Настраиваемые параметры обнаружения сигнала
-    this.noiseThresholdMultiplier = noiseThresholdMultiplier // Чувствительность (Sensitivity)
-    this.minToneDurationMs = minToneDurationMs // Шумодав (Noise Gate)
-
-    // timing thresholds (ms) - will be set from wpm
-    this.dotMs = 120 
-    this.dashMs = 360
-    this.intraCharGap = 120
-    this.interCharGap = 360
-    this.interWordGap = 840
-    
-    // Настраиваемые параметры декодирования
-    this.dashDotRatio = dashDotRatio 
-    this.pauseMultiplier = pauseMultiplier 
-
-    this.fftBuffer = new Uint8Array(this.fftSize/2)
-  }
-
-  setWPM(wpm){
-    // T_dot = 1200 / WPM (для 25 WPM T_dot = 48ms)
-    const dot = Math.max(20, Math.round(1200 / wpm)) 
-    
-    this.dotMs = dot
-    this.dashMs = Math.round(this.dotMs * this.dashDotRatio) 
-    this.intraCharGap = this.dotMs
-    // Межсимвольная пауза: T_dot * PauseMultiplier
-    this.interCharGap = Math.round(this.dotMs * this.pauseMultiplier) 
-    // Межсловная пауза: Стандартное 7 * T_dot
-    this.interWordGap = this.dotMs * 7 
-  }
-
-  async start(){
-    if(this.running) return
-    this.audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    this.source = this.audioCtx.createMediaStreamSource(stream)
-
-    // Bandpass filter для тонкой настройки. Уменьшаем bandwidth для избирательности.
-    this.filter = this.audioCtx.createBiquadFilter()
-    this.filter.type = 'bandpass'
-    this.filter.frequency.value = this.centerFreqHz
-    // Увеличиваем Q-factor (добротность) для более узкой полосы пропускания
-    this.filter.Q.value = this.centerFreqHz / this.bandwidthHz 
-
-    this.analyser = this.audioCtx.createAnalyser()
-    this.analyser.fftSize = this.fftSize
-
-    this.source.connect(this.filter)
-    this.filter.connect(this.analyser)
-
-    this.running = true
-    this.loop()
-  }
-
-  stop(){
-    this.running = false
-    if(this.audioCtx){
-      this.source.mediaStream.getTracks().forEach(track => track.stop())
-      try{ this.audioCtx.close() }catch(e){}
-    }
-  }
-
-  loop(){
-    if(!this.running) return
-    this.analyser.getByteFrequencyData(this.fftBuffer)
-    
-    const sampleRate = this.audioCtx.sampleRate
-    const binCount = this.fftBuffer.length
-    const nyquist = sampleRate/2
-    const freqPerBin = nyquist / binCount
-    
-    // Определяем бины, соответствующие центральной частоте
-    const centerBin = Math.floor(this.centerFreqHz / freqPerBin)
-    const binRange = Math.ceil((this.bandwidthHz / 2) / freqPerBin)
-    const lowBin = Math.max(0, centerBin - binRange)
-    const highBin = Math.min(binCount-1, centerBin + binRange)
-
-    let sum = 0
-    for(let i=lowBin;i<=highBin;i++) sum += this.fftBuffer[i]
-    const avg = sum / (highBin-lowBin+1)
-    
-    const now = performance.now()
-
-    // 1. Адаптивный шумовой порог: обновляем только когда нет тона
-    if (!this.isTone) {
-      this.noiseFloor = this.noiseFloor * this.alpha + avg * (1 - this.alpha)
-    }
-    
-    // 2. Порог обнаружения сигнала: должен быть значительно выше шумового порога
-    const detectionThreshold = this.noiseFloor * this.noiseThresholdMultiplier
-    const isToneNow = avg > detectionThreshold
-
-    if(isToneNow && !this.isTone){
-      // tone started
-      this.isTone = true
-      this.toneStart = now
-      this.peakLevel = avg
-    } else if(isToneNow && this.isTone) {
-      this.peakLevel = Math.max(this.peakLevel, avg)
-    } else if(!isToneNow && this.isTone){
-      // tone ended
-      this.isTone = false
-      this.toneEnd = now
-      this.lastToneEnd = now 
-      const dur = this.toneEnd - this.toneStart
-      
-      // 3. Проверка минимальной длительности тона (Шумодав)
-      if (dur < this.minToneDurationMs) {
-        // Игнорируем слишком короткий тон (шум)
-        this.onRawToggle && this.onRawToggle(false, avg, this.noiseFloor, detectionThreshold)
-        this.lastTick = now
-        requestAnimationFrame(this.loop.bind(this))
-        return
-      }
-
-      // dot or dash
-      // Используем настраиваемое соотношение для определения порога
-      const dotDashThreshold = (this.dotMs * this.dashDotRatio + this.dashMs) / (this.dashDotRatio + 1)
-      
-      if(dur < dotDashThreshold){ 
-        this.symbolBuffer += '.'
-      } else {
-        this.symbolBuffer += '-'
-      }
-      
-      this.onRawToggle && this.onRawToggle(false, avg, this.noiseFloor, detectionThreshold)
-      this.lastTick = now
+        this.isTone = false;
+        this.toneStart = 0;
+        this.lastToneEnd = 0;
+        this.sequence = '';
+        this.animationFrameId = null;
     }
 
-    // if gap long enough -> symbol ended -> decode char
-    const gap = now - this.lastToneEnd 
-    if(!this.isTone && this.symbolBuffer && gap > this.dotMs){ 
-      // decode symbolBuffer to char
-      const gapType = decodeGap(gap, this.dotMs, this.interCharGap, this.interWordGap)
-      this.onSymbol && this.onSymbol(this.symbolBuffer, gapType)
-      this.symbolBuffer = ''
-      this.lastTick = now
+    setWPM(wpm) {
+        this.wpm = wpm;
+        this.dotMs = 60000 / (50 * this.wpm);
+        this.dashMs = this.dotMs * this.options.dashDotRatio;
     }
 
-    // telemetry callback
-    this.onRawToggle && this.onRawToggle(this.isTone, avg, this.noiseFloor, detectionThreshold)
+    async start() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert('Ваш браузер не поддерживает MediaDevices API. Невозможно получить доступ к микрофону.');
+            return;
+        }
 
-    requestAnimationFrame(this.loop.bind(this))
-  }
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            this.mediaStreamSource = this.audioContext.createMediaStreamSource(stream);
+            this.analyser = this.audioContext.createAnalyser();
+            this.analyser.fftSize = this.options.fftSize;
+
+            this.bandpassFilter = this.audioContext.createBiquadFilter();
+            this.bandpassFilter.type = 'bandpass';
+            this.bandpassFilter.frequency.setValueAtTime(this.options.centerFreqHz, this.audioContext.currentTime);
+            this.bandpassFilter.Q.setValueAtTime(this.options.centerFreqHz / this.options.bandwidthHz, this.audioContext.currentTime);
+
+            this.mediaStreamSource.connect(this.bandpassFilter);
+            this.bandpassFilter.connect(this.analyser);
+
+            this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+            this.processAudio();
+        } catch (err) {
+            console.error('Ошибка доступа к микрофону:', err);
+            alert(`Не удалось получить доступ к микрофону: ${err.name}`);
+        }
+    }
+
+    stop() {
+        if (this.animationFrameId) {
+            cancelAnimationFrame(this.animationFrameId);
+        }
+        if (this.audioContext) {
+            this.audioContext.close();
+        }
+        if (this.mediaStreamSource && this.mediaStreamSource.mediaStream) {
+            this.mediaStreamSource.mediaStream.getTracks().forEach(track => track.stop());
+        }
+        this.isTone = false;
+        this.options.onRawToggle(false);
+        this.sequence = '';
+        this.lastToneEnd = 0;
+    }
+
+    processAudio = () => {
+        this.animationFrameId = requestAnimationFrame(this.processAudio);
+
+        this.analyser.getByteFrequencyData(this.dataArray);
+        
+        // 1. Обнаружение сигнала в узкой полосе
+        const centerFreqHz = this.options.centerFreqHz;
+        const bandwidthHz = this.options.bandwidthHz;
+        const sampleRate = this.audioContext.sampleRate;
+        const binCount = this.dataArray.length;
+        const nyquist = sampleRate / 2;
+        const freqPerBin = nyquist / binCount;
+        const centerBin = Math.floor(centerFreqHz / freqPerBin);
+        const binRange = Math.ceil((bandwidthHz / 2) / freqPerBin);
+        const lowBin = Math.max(0, centerBin - binRange);
+        const highBin = Math.min(binCount - 1, centerBin + binRange);
+
+        let sum = 0;
+        for (let i = lowBin; i <= highBin; i++) {
+            sum += this.dataArray[i];
+        }
+        const avg = sum / (highBin - lowBin + 1);
+        
+        const currentTime = Date.now();
+        
+        // 2. Статический порог обнаружения (detectionThreshold = staticThreshold)
+        const detectionThreshold = this.options.staticThreshold;
+        const isToneNow = avg > detectionThreshold;
+
+        // 3. Обработка переходов
+        if (isToneNow && !this.isTone) {
+            // Начало тона
+            
+            // Обработка паузы перед новым тоном
+            if (this.lastToneEnd > 0) {
+                const gapDuration = currentTime - this.lastToneEnd;
+                // Используем 7 * dotMs для межсловной паузы
+                const interWordGap = this.dotMs * 7; 
+                const gapType = decodeGap(gapDuration, this.dotMs, interWordGap, this.options.pauseMultiplier);
+                if (gapType) {
+                    this.options.onSymbol('', gapType); // Отправляем пробел
+                }
+            }
+            
+            this.toneStart = currentTime;
+            this.isTone = true;
+            // Передаем статический порог и текущий avg для осциллограммы
+            this.options.onRawToggle(true, avg, detectionThreshold); 
+            
+        } else if (!isToneNow && this.isTone) {
+            // Конец тона
+            const toneDuration = currentTime - this.toneStart;
+            
+            // Шумодав: игнорируем тон, если он слишком короткий
+            if (toneDuration >= this.options.minToneDurationMs) {
+                // Декодирование символа
+                let symbol = '';
+                // Используем настраиваемое соотношение для определения порога
+                const dotDashThreshold = (this.dotMs * this.options.dashDotRatio + this.dashMs) / (this.options.dashDotRatio + 1);
+                
+                if (toneDuration < dotDashThreshold) {
+                    symbol = '.';
+                } else {
+                    symbol = '-';
+                }
+                
+                this.sequence += symbol;
+                this.options.onSymbol(this.sequence, ''); // Отправляем символ
+                this.sequence = ''; // Сбрасываем для следующего символа
+            }
+            
+            this.lastToneEnd = currentTime;
+            this.isTone = false;
+            this.options.onRawToggle(false, avg, detectionThreshold);
+        } else if (isToneNow && this.isTone) {
+            // Тон продолжается
+            this.options.onRawToggle(true, avg, detectionThreshold);
+        } else {
+            // Пауза продолжается
+            this.options.onRawToggle(false, avg, detectionThreshold);
+        }
+        
+        // 4. Обработка межсимвольной паузы (таймаут)
+        if (!this.isTone && this.lastToneEnd > 0) {
+            const gapDuration = currentTime - this.lastToneEnd;
+            const interWordGap = this.dotMs * 7; 
+            const gapType = decodeGap(gapDuration, this.dotMs, interWordGap, this.options.pauseMultiplier);
+            
+            // Если пауза достаточно длинная, чтобы быть межсловной, сбрасываем lastToneEnd, чтобы не отправлять больше пробелов
+            if (gapType === '  ') {
+                this.options.onSymbol('', gapType); // Отправляем межсловный пробел
+                this.lastToneEnd = 0; 
+            }
+        }
+    }
 }
