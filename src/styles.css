@@ -180,3 +180,21 @@ button:disabled {
     letter-spacing: 0.3em;
   }
 }
+
+
+/* Full Text Display */
+.full-text {
+  margin-bottom: 20px;
+}
+
+.full-text-display {
+  font-size: 1.2em;
+  font-family: monospace;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: #f9f9f9;
+  padding: 15px;
+  border-radius: 6px;
+  border: 1px solid #eee;
+}

@@ -59,7 +59,6 @@ export const MORSE_TABLE = {
   '-.--.-': ')', // Закрывающая скобка
   '.-.-.': '+', // Плюс
   '-...-': '=', // Равно
-  '.-.-': 'Я', // Я
 }
 
 export const LETTERS_SEQUENCES = [
@@ -87,10 +86,9 @@ export function decodeSymbol(seq, mode='letters'){
   }
 }
 
-export function decodeGap(gapDuration, dotMs){
-  const interCharGap = dotMs * 3
-  const interWordGap = dotMs * 7
-
+export function decodeGap(gapDuration, dotMs, interCharGap, interWordGap){
+  // interCharGap и interWordGap теперь передаются из audioProcessor
+  
   if (gapDuration >= interWordGap) {
     return '  ' // Два пробела для межсловного интервала
   } else if (gapDuration >= interCharGap) {

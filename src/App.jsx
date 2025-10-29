@@ -3,7 +3,7 @@ import { db } from './firebaseConfig'
 import { ref, set, push, onValue, onDisconnect, remove } from 'firebase/database'
 import { AudioMorseReceiver } from './audioProcessor'
 import { decodeSymbol } from './morseDecoder'
-import FrequencyVisualizer from './FrequencyVisualizer.jsx' // Импорт визуализатора
+import FrequencyVisualizer from './FrequencyVisualizer.jsx'
 
 // Перевод
 const T = {
@@ -12,7 +12,9 @@ const T = {
   roomIdPlaceholder: 'ID Комнаты',
   joinViewer: 'Присоединиться (наблюдатель)',
   joinHost: 'Присоединиться (приемник)',
-  groupsPerMin: 'Групп в минуту (6..9)',
+  wpm: 'Скорость (WPM)',
+  dashDotRatio: 'Соотношение Тире/Точка',
+  pauseMultiplier: 'Множитель Паузы',
   startReceiving: 'Начать Прием (микрофон)',
   stopReceiving: 'Остановить',
   decodedStream: 'Декодированный поток',
@@ -24,6 +26,9 @@ const T = {
   roomControls: 'Управление комнатой',
   settings: 'Настройки',
   logs: 'Журнал приема',
+  lastGroup: 'Последняя группа (5 символов):',
+  fullText: 'Полный текст:',
+  onlyHost: 'Только владелец комнаты может управлять приемом.',
 }
 
 // Уникальный ID клиента
@@ -33,23 +38,27 @@ export default function App(){
   const [roomId, setRoomId] = useState('')
   const [joinedRoom, setJoinedRoom] = useState(null)
   const [isHost, setIsHost] = useState(false)
-  const [groupsPerMin, setGroupsPerMin] = useState(7)
+  
+  // Новые настройки
+  const [wpm, setWpm] = useState(60) // Скорость (WPM)
+  const [dashDotRatio, setDashDotRatio] = useState(4.5) // Соотношение Тире/Точка
+  const [pauseMultiplier, setPauseMultiplier] = useState(5.5) // Множитель Паузы
+  
   const [decodeMode, setDecodeMode] = useState('letters') // 'letters' or 'digits'
   const [logs, setLogs] = useState([])
-  const [currentGroup, setCurrentGroup] = useState('')
-  const [analyser, setAnalyser] = useState(null) // Состояние для AnalyserNode
-  const [isTone, setIsTone] = useState(false) // Состояние для индикации тона
+  const [analyser, setAnalyser] = useState(null)
+  const [isTone, setIsTone] = useState(false)
   const receiverRef = useRef(null)
   const clientIdRef = useRef(uid())
   const lastCharRef = useRef(null)
 
-  // Обновление логов и группировка по 5 символов
+  // Обновление логов
   useEffect(()=>{
     if(joinedRoom){
       const messagesRef = ref(db, `rooms/${joinedRoom}/messages`)
       const unsubscribe = onValue(messagesRef, snapshot=>{
         const data = snapshot.val() || {}
-        const arr = Object.values(data).sort((a, b) => a.ts - b.ts) // Сортировка по времени
+        const arr = Object.values(data).sort((a, b) => a.ts - b.ts)
         setLogs(arr)
       })
       return () => unsubscribe()
@@ -57,54 +66,76 @@ export default function App(){
   },[joinedRoom])
 
   // Группировка символов для отображения
-  useEffect(() => {
-    const chars = logs.map(m => m.char).filter(c => c !== ' ')
-    let group = ''
-    let charCount = 0
-    for(let i = chars.length - 1; i >= 0; i--) {
-      if (chars[i] !== '?') {
-        group = chars[i] + group
-        charCount++
-        if (charCount >= 5) break
+  const { currentGroup, fullText } = useMemo(() => {
+    let currentGroup = '';
+    let fullText = '';
+    let charCount = 0;
+    
+    // Фильтруем символы, чтобы не включать в текст служебные символы
+    const chars = logs.map(m => m.char).filter(c => c !== null && c !== undefined);
+
+    for (const char of chars) {
+      if (char === ' ' || char === '  ') {
+        fullText += (char === '  ' ? ' / ' : ' ');
+      } else if (char !== '?') {
+        fullText += char;
       }
     }
-    setCurrentGroup(group)
-  }, [logs])
+    
+    // Формирование последней группы из 5 символов
+    const cleanChars = chars.filter(c => c !== ' ' && c !== '  ' && c !== '?');
+    for(let i = cleanChars.length - 1; i >= 0; i--) {
+      currentGroup = cleanChars[i] + currentGroup;
+      charCount++;
+      if (charCount >= 5) break;
+    }
+
+    return { currentGroup, fullText };
+  }, [logs]);
 
   const createRoom = useCallback(async () => {
     const id = Math.random().toString(36).slice(2,8).toUpperCase()
     setRoomId(id)
-    await set(ref(db, `rooms/${id}`), {created: Date.now(), mode: decodeMode})
+    await set(ref(db, `rooms/${id}`), {
+      created: Date.now(), 
+      mode: decodeMode,
+      wpm,
+      dashDotRatio,
+      pauseMultiplier
+    })
     joinRoom(id, true)
-  }, [decodeMode])
+  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier])
 
   const joinRoom = useCallback(async (id, asHost=false) => {
     if (!id) return
     setJoinedRoom(id)
     setIsHost(asHost)
-    // Присутствие через список клиентов
+    
     const clientRef = ref(db, `rooms/${id}/clients/${clientIdRef.current}`)
     await set(clientRef, {connected: true, ts: Date.now(), host: asHost})
     onDisconnect(clientRef).remove()
 
-    // Если наблюдатель, синхронизировать режим декодирования
-    if (!asHost) {
-      const roomRef = ref(db, `rooms/${id}`)
-      onValue(roomRef, (snapshot) => {
-        const roomData = snapshot.val()
-        if (roomData && roomData.mode) {
-          setDecodeMode(roomData.mode)
-        }
-      }, { onlyOnce: true })
-    }
+    const roomRef = ref(db, `rooms/${id}`)
+    onValue(roomRef, (snapshot) => {
+      const roomData = snapshot.val()
+      if (roomData) {
+        setDecodeMode(roomData.mode || 'letters')
+        setWpm(roomData.wpm || 60)
+        setDashDotRatio(roomData.dashDotRatio || 4.5)
+        setPauseMultiplier(roomData.pauseMultiplier || 5.5)
+      }
+    })
   }, [])
 
-  // Обновление режима декодирования в базе данных
+  // Обновление настроек в базе данных
   useEffect(() => {
     if (joinedRoom && isHost) {
       set(ref(db, `rooms/${joinedRoom}/mode`), decodeMode)
+      set(ref(db, `rooms/${joinedRoom}/wpm`), wpm)
+      set(ref(db, `rooms/${joinedRoom}/dashDotRatio`), dashDotRatio)
+      set(ref(db, `rooms/${joinedRoom}/pauseMultiplier`), pauseMultiplier)
     }
-  }, [decodeMode, joinedRoom, isHost])
+  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier, joinedRoom, isHost])
 
   const handleSymbol = useCallback(async (seq, gapType) => {
     const char = decodeSymbol(seq, decodeMode)
@@ -125,27 +156,53 @@ export default function App(){
 
   const startReceiving = useCallback(async () => {
     if(!joinedRoom) return alert(T.joinRoomFirst)
-    if(receiverRef.current) receiverRef.current.stop() // Остановить предыдущий, если есть
+    if(receiverRef.current) receiverRef.current.stop()
 
     receiverRef.current = new AudioMorseReceiver({
       onSymbol: handleSymbol,
       onRawToggle: (isTone, level)=>{
-        setIsTone(isTone) // Обновление состояния для визуализатора
+        setIsTone(isTone)
       },
-      centerFreqHz: 1600, // Центральная частота для Bandpass
-      bandwidthHz: 400,   // Ширина полосы для Bandpass
+      centerFreqHz: 1600,
+      bandwidthHz: 400,
       fftSize: 2048,
-      sampleRate: 44100
+      sampleRate: 44100,
+      // Передача новых настроек
+      dashDotRatio: dashDotRatio,
+      pauseMultiplier: pauseMultiplier
     })
-    receiverRef.current.setWPM(groupsPerMin)
+    receiverRef.current.setWPM(wpm)
     await receiverRef.current.start()
-    setAnalyser(receiverRef.current.analyser) // Установка AnalyserNode для визуализатора
-  }, [joinedRoom, groupsPerMin, handleSymbol])
+    setAnalyser(receiverRef.current.analyser)
+  }, [joinedRoom, wpm, dashDotRatio, pauseMultiplier, handleSymbol])
 
   const stopReceiving = useCallback(() => {
     receiverRef.current && receiverRef.current.stop()
-    setAnalyser(null) // Очистка AnalyserNode
+    setAnalyser(null)
   }, [])
+
+  // Вспомогательная функция для форматирования текста с группировкой по 5 символов
+  const formatTextWithGroups = (text) => {
+    let result = '';
+    let charCount = 0;
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === ' ') {
+            result += char;
+        } else if (char === '/') {
+            result += char;
+        } else {
+            result += char;
+            charCount++;
+            if (charCount % 5 === 0 && i < text.length - 1 && text[i+1] !== ' ' && text[i+1] !== '/') {
+                result += ' '; // Добавляем пробел после каждой группы из 5 символов
+            }
+        }
+    }
+    return result;
+  }
+  
+  const formattedFullText = formatTextWithGroups(fullText);
 
   return (
     <div className="app">
@@ -164,11 +221,50 @@ export default function App(){
 
       <section className="settings">
         <h2>{T.settings}</h2>
+        
+        {/* Настройка WPM */}
         <div className="setting-item">
-          <label>{T.groupsPerMin}</label>
-          <input type="range" min={6} max={9} value={groupsPerMin} onChange={e=>setGroupsPerMin(Number(e.target.value))} />
-          <span>{groupsPerMin}</span>
+          <label>{T.wpm} ({wpm})</label>
+          <input 
+            type="range" 
+            min={30} 
+            max={150} 
+            step={5}
+            value={wpm} 
+            onChange={e=>setWpm(Number(e.target.value))} 
+            disabled={!isHost}
+          />
         </div>
+
+        {/* Настройка Соотношения Тире/Точка */}
+        <div className="setting-item">
+          <label>{T.dashDotRatio} ({dashDotRatio.toFixed(1)})</label>
+          <input 
+            type="range" 
+            min={2.0} 
+            max={4.5} 
+            step={0.1}
+            value={dashDotRatio} 
+            onChange={e=>setDashDotRatio(Number(e.target.value))} 
+            disabled={!isHost}
+          />
+        </div>
+
+        {/* Настройка Множителя Паузы */}
+        <div className="setting-item">
+          <label>{T.pauseMultiplier} (x{pauseMultiplier.toFixed(1)})</label>
+          <input 
+            type="range" 
+            min={1.0} 
+            max={6.0} 
+            step={0.1}
+            value={pauseMultiplier} 
+            onChange={e=>setPauseMultiplier(Number(e.target.value))} 
+            disabled={!isHost}
+          />
+        </div>
+
+        {/* Режим декодирования */}
         <div className="setting-item">
           <label>{T.mode}</label>
           <button onClick={() => setDecodeMode('letters')} disabled={decodeMode === 'letters' || !isHost}>{T.modeLetters}</button>
@@ -186,16 +282,23 @@ export default function App(){
             {analyser && <FrequencyVisualizer analyser={analyser} isTone={isTone} />}
           </>
         ) : (
-          <p>Только владелец комнаты может управлять приемом.</p>
+          <p>{T.onlyHost}</p>
         )}
       </section>
 
       <section className="logs">
         <h2>{T.logs}</h2>
+        
+        <div className="full-text">
+          <h3>{T.fullText}</h3>
+          <p className="full-text-display">{formattedFullText || 'Ожидание приема...'}</p>
+        </div>
+        
         <div className="current-group">
-          <h3>Последняя группа (5 символов):</h3>
+          <h3>{T.lastGroup}</h3>
           <p className="group-display">{currentGroup.padEnd(5, '_')}</p>
         </div>
+        
         <div className="stream">
           <h3>{T.decodedStream}</h3>
           {logs.slice(-50).map((m, i)=> (
