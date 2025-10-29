@@ -2,9 +2,9 @@
 import { decodeGap } from './morseDecoder'
 
 export class AudioMorseReceiver {
-  constructor({onSymbol, onRawToggle, centerFreqHz = 1600, bandwidthHz = 100, fftSize=2048, sampleRate=44100, dashDotRatio = 3.0, pauseMultiplier = 3.0}){
+  constructor({onSymbol, onRawToggle, centerFreqHz = 1600, bandwidthHz = 100, fftSize=2048, sampleRate=44100, dashDotRatio = 3.0, pauseMultiplier = 3.0, noiseThresholdMultiplier = 2.0, minToneDurationMs = 20}){
     this.onSymbol = onSymbol // called when a decoded letter arrives (seq, gapType)
-    this.onRawToggle = onRawToggle // called for debug: (isToneOn, level)
+    this.onRawToggle = onRawToggle // called for debug: (isToneOn, level, noiseFloor, detectionThreshold)
     this.centerFreqHz = centerFreqHz 
     this.bandwidthHz = bandwidthHz   
     this.fftSize = fftSize
@@ -29,8 +29,10 @@ export class AudioMorseReceiver {
     this.noiseFloor = 0
     this.peakLevel = 0
     this.alpha = 0.99 // Увеличиваем сглаживание для более стабильного шумового порога
-    this.noiseThresholdMultiplier = 2.0 // Уровень сигнала должен быть в 2 раза выше шума
-    this.minToneDurationMs = 20 // Минимальная длительность тона, чтобы отфильтровать короткие всплески шума
+    
+    // Настраиваемые параметры обнаружения сигнала
+    this.noiseThresholdMultiplier = noiseThresholdMultiplier // Чувствительность (Sensitivity)
+    this.minToneDurationMs = minToneDurationMs // Шумодав (Noise Gate)
 
     // timing thresholds (ms) - will be set from wpm
     this.dotMs = 120 
@@ -39,7 +41,7 @@ export class AudioMorseReceiver {
     this.interCharGap = 360
     this.interWordGap = 840
     
-    // Настраиваемые параметры
+    // Настраиваемые параметры декодирования
     this.dashDotRatio = dashDotRatio 
     this.pauseMultiplier = pauseMultiplier 
 
@@ -53,7 +55,7 @@ export class AudioMorseReceiver {
     this.dotMs = dot
     this.dashMs = Math.round(this.dotMs * this.dashDotRatio) 
     this.intraCharGap = this.dotMs
-    // Межсимвольная пауза: T_dot * PauseMultiplier (в APAK 2.12 это x5.5)
+    // Межсимвольная пауза: T_dot * PauseMultiplier
     this.interCharGap = Math.round(this.dotMs * this.pauseMultiplier) 
     // Межсловная пауза: Стандартное 7 * T_dot
     this.interWordGap = this.dotMs * 7 
@@ -134,10 +136,10 @@ export class AudioMorseReceiver {
       this.lastToneEnd = now 
       const dur = this.toneEnd - this.toneStart
       
-      // 3. Проверка минимальной длительности тона (для отсева шума)
+      // 3. Проверка минимальной длительности тона (Шумодав)
       if (dur < this.minToneDurationMs) {
         // Игнорируем слишком короткий тон (шум)
-        this.onRawToggle && this.onRawToggle(false, avg)
+        this.onRawToggle && this.onRawToggle(false, avg, this.noiseFloor, detectionThreshold)
         this.lastTick = now
         requestAnimationFrame(this.loop.bind(this))
         return
@@ -153,7 +155,7 @@ export class AudioMorseReceiver {
         this.symbolBuffer += '-'
       }
       
-      this.onRawToggle && this.onRawToggle(false, avg)
+      this.onRawToggle && this.onRawToggle(false, avg, this.noiseFloor, detectionThreshold)
       this.lastTick = now
     }
 
@@ -168,7 +170,7 @@ export class AudioMorseReceiver {
     }
 
     // telemetry callback
-    this.onRawToggle && this.onRawToggle(this.isTone, avg)
+    this.onRawToggle && this.onRawToggle(this.isTone, avg, this.noiseFloor, detectionThreshold)
 
     requestAnimationFrame(this.loop.bind(this))
   }

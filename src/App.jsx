@@ -15,6 +15,8 @@ const T = {
   wpm: 'Скорость (WPM)',
   dashDotRatio: 'Соотношение Тире/Точка',
   pauseMultiplier: 'Множитель Паузы',
+  sensitivity: 'Чувствительность',
+  noiseGate: 'Шумодав (мс)',
   startReceiving: 'Начать Прием (микрофон)',
   stopReceiving: 'Остановить',
   decodedStream: 'Декодированный поток',
@@ -39,15 +41,22 @@ export default function App(){
   const [joinedRoom, setJoinedRoom] = useState(null)
   const [isHost, setIsHost] = useState(false)
   
-  // Новые настройки
+  // Настройки декодирования
   const [wpm, setWpm] = useState(60) // Скорость (WPM)
   const [dashDotRatio, setDashDotRatio] = useState(4.5) // Соотношение Тире/Точка
   const [pauseMultiplier, setPauseMultiplier] = useState(5.5) // Множитель Паузы
+  
+  // Новые настройки обнаружения сигнала
+  const [sensitivity, setSensitivity] = useState(2.0) // Множитель порога (2.0 = в 2 раза выше шума)
+  const [noiseGate, setNoiseGate] = useState(20) // Минимальная длительность тона (мс)
   
   const [decodeMode, setDecodeMode] = useState('letters') // 'letters' or 'digits'
   const [logs, setLogs] = useState([])
   const [analyser, setAnalyser] = useState(null)
   const [isTone, setIsTone] = useState(false)
+  const [noiseFloor, setNoiseFloor] = useState(0) // Уровень шума
+  const [detectionThreshold, setDetectionThreshold] = useState(0) // Порог обнаружения
+  
   const receiverRef = useRef(null)
   const clientIdRef = useRef(uid())
   const lastCharRef = useRef(null)
@@ -101,10 +110,12 @@ export default function App(){
       mode: decodeMode,
       wpm,
       dashDotRatio,
-      pauseMultiplier
+      pauseMultiplier,
+      sensitivity,
+      noiseGate
     })
     joinRoom(id, true)
-  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier])
+  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier, sensitivity, noiseGate])
 
   const joinRoom = useCallback(async (id, asHost=false) => {
     if (!id) return
@@ -123,6 +134,8 @@ export default function App(){
         setWpm(roomData.wpm || 60)
         setDashDotRatio(roomData.dashDotRatio || 4.5)
         setPauseMultiplier(roomData.pauseMultiplier || 5.5)
+        setSensitivity(roomData.sensitivity || 2.0)
+        setNoiseGate(roomData.noiseGate || 20)
       }
     })
   }, [])
@@ -134,8 +147,10 @@ export default function App(){
       set(ref(db, `rooms/${joinedRoom}/wpm`), wpm)
       set(ref(db, `rooms/${joinedRoom}/dashDotRatio`), dashDotRatio)
       set(ref(db, `rooms/${joinedRoom}/pauseMultiplier`), pauseMultiplier)
+      set(ref(db, `rooms/${joinedRoom}/sensitivity`), sensitivity)
+      set(ref(db, `rooms/${joinedRoom}/noiseGate`), noiseGate)
     }
-  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier, joinedRoom, isHost])
+  }, [decodeMode, wpm, dashDotRatio, pauseMultiplier, sensitivity, noiseGate, joinedRoom, isHost])
 
   const handleSymbol = useCallback(async (seq, gapType) => {
     const char = decodeSymbol(seq, decodeMode)
@@ -160,21 +175,25 @@ export default function App(){
 
     receiverRef.current = new AudioMorseReceiver({
       onSymbol: handleSymbol,
-      onRawToggle: (isTone, level)=>{
+      onRawToggle: (isTone, level, noiseFloor, detectionThreshold)=>{
         setIsTone(isTone)
+        setNoiseFloor(noiseFloor)
+        setDetectionThreshold(detectionThreshold)
       },
       centerFreqHz: 1600,
-      bandwidthHz: 400,
+      bandwidthHz: 100, // Уменьшено для избирательности
       fftSize: 2048,
       sampleRate: 44100,
       // Передача новых настроек
       dashDotRatio: dashDotRatio,
-      pauseMultiplier: pauseMultiplier
+      pauseMultiplier: pauseMultiplier,
+      noiseThresholdMultiplier: sensitivity,
+      minToneDurationMs: noiseGate
     })
     receiverRef.current.setWPM(wpm)
     await receiverRef.current.start()
     setAnalyser(receiverRef.current.analyser)
-  }, [joinedRoom, wpm, dashDotRatio, pauseMultiplier, handleSymbol])
+  }, [joinedRoom, wpm, dashDotRatio, pauseMultiplier, sensitivity, noiseGate, handleSymbol])
 
   const stopReceiving = useCallback(() => {
     receiverRef.current && receiverRef.current.stop()
@@ -264,6 +283,34 @@ export default function App(){
           />
         </div>
 
+        {/* Настройка Чувствительности */}
+        <div className="setting-item">
+          <label>{T.sensitivity} (x{sensitivity.toFixed(1)})</label>
+          <input 
+            type="range" 
+            min={1.0} 
+            max={5.0} 
+            step={0.1}
+            value={sensitivity} 
+            onChange={e=>setSensitivity(Number(e.target.value))} 
+            disabled={!isHost}
+          />
+        </div>
+
+        {/* Настройка Шумодава */}
+        <div className="setting-item">
+          <label>{T.noiseGate} ({noiseGate} мс)</label>
+          <input 
+            type="range" 
+            min={0} 
+            max={100} 
+            step={5}
+            value={noiseGate} 
+            onChange={e=>setNoiseGate(Number(e.target.value))} 
+            disabled={!isHost}
+          />
+        </div>
+
         {/* Режим декодирования */}
         <div className="setting-item">
           <label>{T.mode}</label>
@@ -279,7 +326,12 @@ export default function App(){
           <>
             <button onClick={startReceiving}>{T.startReceiving}</button>
             <button onClick={stopReceiving}>{T.stopReceiving}</button>
-            {analyser && <FrequencyVisualizer analyser={analyser} isTone={isTone} />}
+            {analyser && <FrequencyVisualizer 
+              analyser={analyser} 
+              isTone={isTone} 
+              noiseFloor={noiseFloor} 
+              detectionThreshold={detectionThreshold}
+            />}
           </>
         ) : (
           <p>{T.onlyHost}</p>

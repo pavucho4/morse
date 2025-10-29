@@ -198,3 +198,7 @@ button:disabled {
   border-radius: 6px;
   border: 1px solid #eee;
 }
+
+.setting-item input[type="range"] {
+  flex-grow: 2;
+}
