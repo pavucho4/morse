@@ -202,3 +202,9 @@ button:disabled {
 .setting-item input[type="range"] {
   flex-grow: 2;
 }
+
+/* Осциллограмма */
+.visualizer-container canvas {
+  margin-bottom: 10px;
+  display: block; /* Убедимся, что canvas занимает всю доступную ширину */
+}

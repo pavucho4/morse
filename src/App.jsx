@@ -289,7 +289,7 @@ export default function App(){
           <input 
             type="range" 
             min={1.0} 
-            max={5.0} 
+            max={10.0} 
             step={0.1}
             value={sensitivity} 
             onChange={e=>setSensitivity(Number(e.target.value))} 
@@ -303,7 +303,7 @@ export default function App(){
           <input 
             type="range" 
             min={0} 
-            max={100} 
+            max={200} 
             step={5}
             value={noiseGate} 
             onChange={e=>setNoiseGate(Number(e.target.value))} 
