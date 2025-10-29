@@ -2,7 +2,7 @@
 import { decodeGap } from './morseDecoder'
 
 export class AudioMorseReceiver {
-  constructor({onSymbol, onRawToggle, centerFreqHz = 1600, bandwidthHz = 400, fftSize=2048, sampleRate=44100, dashDotRatio = 3.0, pauseMultiplier = 3.0}){
+  constructor({onSymbol, onRawToggle, centerFreqHz = 1600, bandwidthHz = 100, fftSize=2048, sampleRate=44100, dashDotRatio = 3.0, pauseMultiplier = 3.0}){
     this.onSymbol = onSymbol // called when a decoded letter arrives (seq, gapType)
     this.onRawToggle = onRawToggle // called for debug: (isToneOn, level)
     this.centerFreqHz = centerFreqHz 
@@ -28,7 +28,9 @@ export class AudioMorseReceiver {
     // adaptive threshold
     this.noiseFloor = 0
     this.peakLevel = 0
-    this.alpha = 0.95 
+    this.alpha = 0.99 // Увеличиваем сглаживание для более стабильного шумового порога
+    this.noiseThresholdMultiplier = 2.0 // Уровень сигнала должен быть в 2 раза выше шума
+    this.minToneDurationMs = 20 // Минимальная длительность тона, чтобы отфильтровать короткие всплески шума
 
     // timing thresholds (ms) - will be set from wpm
     this.dotMs = 120 
@@ -37,51 +39,24 @@ export class AudioMorseReceiver {
     this.interCharGap = 360
     this.interWordGap = 840
     
-    // Новые настраиваемые параметры
-    this.dashDotRatio = dashDotRatio // Соотношение Тире/Точка (по умолчанию 3.0)
-    this.pauseMultiplier = pauseMultiplier // Множитель для межсимвольной паузы (по умолчанию 3.0)
+    // Настраиваемые параметры
+    this.dashDotRatio = dashDotRatio 
+    this.pauseMultiplier = pauseMultiplier 
 
     this.fftBuffer = new Uint8Array(this.fftSize/2)
   }
 
   setWPM(wpm){
-    // Стандартная формула для расчета длительности точки (ms) на основе WPM
-    // WPM = 1200 / T_dot (где T_dot - длительность точки в мс для слова PARIS)
-    // T_dot = 1200 / WPM
-    
-    // Для нашего случая, где WPM - это Groups Per Minute (GPM), и 1 группа = 5 символов
-    // T_dot = 60000 / (50 * WPM)
-    // Мы используем более простую формулу, где WPM - это слова в минуту (PARIS), 
-    // и 1 WPM = 60/50 = 1.2 dot/sec. 
-    // T_dot = 1200 / WPM (для 50 WPM, T_dot = 24ms, что слишком мало)
-    
-    // Используем формулу для T_dot = 60000 / (50 * WPM) = 1200 / WPM
-    // T_dot = 60000 / (50 * WPM) = 1200 / WPM - это для WPM, где 1 WPM = 1 слово в минуту.
-    // Для 60 WPM T_dot = 20ms, что очень быстро.
-    
-    // Используем более реалистичный подход, где WPM - это количество слов PARIS в минуту.
-    // Длительность точки (T_dot) = 1200 / WPM (для 25 WPM T_dot = 48ms)
-    // Давайте использовать формулу, которая дает более разумные значения для любительской связи:
-    // T_dot = 60000 / (12 * WPM) - для 12 WPM, T_dot = 416ms
-    // T_dot = 1200 / WPM - для 60 WPM, T_dot = 20ms
-    
-    // Вернемся к простому: WPM - это символы в минуту. 
-    // T_dot = 60000 / (12 * WPM_символов)
-    // Для 60 WPM (слов в минуту) это около 300 символов в минуту.
-    // T_dot = 60000 / (12 * 300) = 16.6ms - все еще слишком быстро.
-    
-    // Примем, что WPM - это слова в минуту (PARIS).
     // T_dot = 1200 / WPM (для 25 WPM T_dot = 48ms)
-    // T_dot = 60000 / (50 * WPM) - для 25 WPM T_dot = 48ms
-    
-    // Используем T_dot = 1200 / WPM, но сдвинем диапазон WPM
-    const dot = Math.max(20, Math.round(1200 / wpm)) // 60 WPM -> 20ms, 30 WPM -> 40ms, 150 WPM -> 8ms
+    const dot = Math.max(20, Math.round(1200 / wpm)) 
     
     this.dotMs = dot
-    this.dashMs = Math.round(this.dotMs * this.dashDotRatio) // Используем настраиваемый коэффициент
+    this.dashMs = Math.round(this.dotMs * this.dashDotRatio) 
     this.intraCharGap = this.dotMs
-    this.interCharGap = Math.round(this.dotMs * this.pauseMultiplier) // Используем настраиваемый множитель
-    this.interWordGap = this.dotMs * 7 // Стандартное 7 * T_dot
+    // Межсимвольная пауза: T_dot * PauseMultiplier (в APAK 2.12 это x5.5)
+    this.interCharGap = Math.round(this.dotMs * this.pauseMultiplier) 
+    // Межсловная пауза: Стандартное 7 * T_dot
+    this.interWordGap = this.dotMs * 7 
   }
 
   async start(){
@@ -90,10 +65,11 @@ export class AudioMorseReceiver {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     this.source = this.audioCtx.createMediaStreamSource(stream)
 
-    // Bandpass filter для тонкой настройки
+    // Bandpass filter для тонкой настройки. Уменьшаем bandwidth для избирательности.
     this.filter = this.audioCtx.createBiquadFilter()
     this.filter.type = 'bandpass'
     this.filter.frequency.value = this.centerFreqHz
+    // Увеличиваем Q-factor (добротность) для более узкой полосы пропускания
     this.filter.Q.value = this.centerFreqHz / this.bandwidthHz 
 
     this.analyser = this.audioCtx.createAnalyser()
@@ -101,7 +77,6 @@ export class AudioMorseReceiver {
 
     this.source.connect(this.filter)
     this.filter.connect(this.analyser)
-    // НЕ ПОДКЛЮЧАЕМ К DESTINATION, чтобы избежать эха
 
     this.running = true
     this.loop()
@@ -134,19 +109,16 @@ export class AudioMorseReceiver {
     for(let i=lowBin;i<=highBin;i++) sum += this.fftBuffer[i]
     const avg = sum / (highBin-lowBin+1)
     
-    // Адаптивный порог:
-    // 1. Обновляем шумовой порог (noiseFloor)
+    const now = performance.now()
+
+    // 1. Адаптивный шумовой порог: обновляем только когда нет тона
     if (!this.isTone) {
       this.noiseFloor = this.noiseFloor * this.alpha + avg * (1 - this.alpha)
     }
     
-    // 2. Определяем порог как noiseFloor + смещение (например, 10-20 единиц)
-    const thresholdOffset = 15 
-    const threshold = this.noiseFloor + thresholdOffset
-    
-    const isToneNow = avg > threshold
-
-    const now = performance.now()
+    // 2. Порог обнаружения сигнала: должен быть значительно выше шумового порога
+    const detectionThreshold = this.noiseFloor * this.noiseThresholdMultiplier
+    const isToneNow = avg > detectionThreshold
 
     if(isToneNow && !this.isTone){
       // tone started
@@ -162,9 +134,18 @@ export class AudioMorseReceiver {
       this.lastToneEnd = now 
       const dur = this.toneEnd - this.toneStart
       
+      // 3. Проверка минимальной длительности тона (для отсева шума)
+      if (dur < this.minToneDurationMs) {
+        // Игнорируем слишком короткий тон (шум)
+        this.onRawToggle && this.onRawToggle(false, avg)
+        this.lastTick = now
+        requestAnimationFrame(this.loop.bind(this))
+        return
+      }
+
       // dot or dash
-      // Используем среднее арифметическое между dotMs и dashMs для определения порога
-      const dotDashThreshold = (this.dotMs + this.dashMs) / 2
+      // Используем настраиваемое соотношение для определения порога
+      const dotDashThreshold = (this.dotMs * this.dashDotRatio + this.dashMs) / (this.dashDotRatio + 1)
       
       if(dur < dotDashThreshold){ 
         this.symbolBuffer += '.'
@@ -180,7 +161,6 @@ export class AudioMorseReceiver {
     const gap = now - this.lastToneEnd 
     if(!this.isTone && this.symbolBuffer && gap > this.dotMs){ 
       // decode symbolBuffer to char
-      // Используем interCharGap для определения межсимвольной паузы
       const gapType = decodeGap(gap, this.dotMs, this.interCharGap, this.interWordGap)
       this.onSymbol && this.onSymbol(this.symbolBuffer, gapType)
       this.symbolBuffer = ''
